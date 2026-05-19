@@ -1,0 +1,8 @@
+description: 'Az alábbiakban kémiával kapcsolatos többszörös választásos kérdések (válaszokkal) találhatók. 
+  Gondolkozz lépésről lépésre, majd fejezd be a válaszodat a "A válasz (X)" szöveggel, ahol X a helyes válasz betűjele.
+
+  '
+include: _hu_template_yaml
+task: mmlu_prox_hu_chemistry
+task_alias: chemistry
+process_docs: !function utils.process_chemistry

@@ -1,0 +1,185 @@
+import argparse
+import os
+import json
+import copy
+from prompt import PROMPTS, LANG_DICT
+from models import build_model
+from output_parser import build_output_parser
+from utils import (
+    load_testset, 
+    load_unidirectional_testset, 
+    post_process, 
+    get_directions, 
+    handle_arg_string,
+    is_unidirectional,
+)
+from transformers import AutoTokenizer, AutoModelForCausalLM,GenerationConfig
+
+from torch.utils.data import DataLoader
+
+import torch
+from tqdm import tqdm
+
+def genertate_translation(model, messages, tokenizer,max_tokens,batch_size, **kwargs):
+
+    def _prepare_batches(texts):
+        """将文本转换为批处理的tokenized输入"""
+        encodings = tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            add_special_tokens=True
+        )
+        return encodings
+
+    meassages = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    dataloader = DataLoader(meassages, batch_size=batch_size)
+    # import pdb; pdb.set_trace()
+    all_outputs = []
+    for batch in tqdm(dataloader, desc="Generating translations"):
+        encodings = _prepare_batches(batch)
+        input_ids = encodings["input_ids"].to(model.device)
+        attention_mask = encodings["attention_mask"].to(model.device)
+        
+
+        generation_config = {
+            "max_new_tokens": max_tokens,
+            "do_sample": False,
+            'use_cache': True,
+        }
+        eos_config = GenerationConfig(eos_token_id=[151645, 151643])
+
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                generation_config=eos_config,
+                **generation_config
+            )
+            batch_outputs = [
+                tokenizer.decode(
+                    output[len(input_ids[i]):],  # 只解码生成部分
+                    skip_special_tokens=True
+                )
+                for i, output in enumerate(outputs)
+            ]
+            all_outputs.extend(batch_outputs)
+    
+    # import pdb; pdb.set_trace()
+    return all_outputs
+
+def build_prompts(src_dataset, src_lang, tgt_lang, task):
+    prompts = []
+    src_lang = LANG_DICT[src_lang]
+    tgt_lang = LANG_DICT[tgt_lang]
+    prompt_template = PROMPTS["flores_update"]
+    for sample in src_dataset:
+        if task == "nexus":
+            arguments = "\n".join(sample["kwargs"]["args"])
+            if arguments:
+                prompt = prompt_template.format(src_lang=src_lang, tgt_lang=tgt_lang, src=sample["text"], args=arguments)
+            else:
+                prompt = PROMPTS["general"].format(src_lang=src_lang, tgt_lang=tgt_lang, src=sample["text"])
+        else:
+            prompt = prompt_template.format(src_lang=src_lang, tgt_lang=tgt_lang, src=sample["text"])
+        prompts.append(prompt)
+    return prompts
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--src-lang", "-s", type=str, default=None)
+    parser.add_argument("--tgt-lang", "-t", type=str, default=None)
+    parser.add_argument("--languages", "-l", type=str, default=None)
+    parser.add_argument("--task-name", type=str, required=True, help="The task name of test set")
+    parser.add_argument("--model-name", "-m", type=str, required=True)
+    parser.add_argument("--tokenizer", type=str, default=None)
+    parser.add_argument("--infer-backend", type=str, required=True)
+    parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
+    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--base-url", type=str, default=None)
+    parser.add_argument("--num-concurrent", type=int, default=300)
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--output-parser", type=str, default=None)
+    parser.add_argument("--output-dir", type=str, default="./output")
+    args, unknown_args = parser.parse_known_args()
+    unknown_args_dict = {unknown_args[i].lstrip('--'): handle_arg_string(unknown_args[i + 1]) for i in range(0, len(unknown_args), 2)}
+
+    src_lang = args.src_lang
+    tgt_lang = args.tgt_lang
+    langs = args.languages
+    if langs is None and (src_lang is None or tgt_lang is None):
+        raise ValueError("Either --languages or --src-lang and --tgt-lang should be provided")
+    if langs is not None and (src_lang is not None or tgt_lang is not None):
+        raise ValueError("Only one of --languages or --src-lang and --tgt-lang should be provided")
+
+    task_name = args.task_name
+    directions = get_directions(src_lang, tgt_lang, langs)
+    unidirectional = is_unidirectional(task_name)
+
+    print("Loading test set and building prompts...")
+    prompts, sizes = [], []
+    src_datasets, tgt_datasets = {}, {}
+    if not unidirectional:
+        for s_l, t_l in directions:
+            if s_l not in src_datasets:
+                src_datasets[s_l] = load_testset(task_name, s_l, is_src=True)
+            if t_l not in tgt_datasets:
+                tgt_datasets[t_l] = load_testset(task_name, t_l)
+            prompts.extend(build_prompts(src_datasets[s_l], s_l, t_l, task_name))
+        sizes = [len(src_datasets[directions[0][0]])] * len(directions)
+    else:
+        for s_l, t_l in directions:
+            src_dataset, tgt_dataset = load_unidirectional_testset(task_name, s_l, t_l)
+            d = f"{s_l}-{t_l}"
+            src_datasets[d] = src_dataset
+            tgt_datasets[d] = tgt_dataset
+            prompts.extend(build_prompts(src_dataset, s_l, t_l, task_name))
+            sizes.append(len(src_dataset))
+    
+    messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
+
+    print(f"Building model {args.model_name}")
+    # model = build_model(args.model_name, args.infer_backend, args.tokenizer, args.tensor_parallel_size, args.trust_remote_code, args.base_url, args.num_concurrent, **unknown_args_dict)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name,padding_side="left")
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token  # 使用eos_token作为pad_token
+
+    model = AutoModelForCausalLM.from_pretrained(args.model_name,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+        device_map="auto",
+    )
+    model_output_parser = build_output_parser(args.output_parser)
+
+    print("Generating translations...")
+    print(messages[0])
+    # outputs = model.chat(messages, temperature=0.0, max_tokens=args.max_tokens)
+    outputs = genertate_translation(model, messages, tokenizer,args.max_tokens,args.batch_size)
+    # model.chat(messages, temperature=0.0, max_tokens=args.max_tokens)
+
+    outputs = model_output_parser.parse(outputs)
+    #for qwenmodify
+    post_process(outputs, task_name)
+    # import pdb;pdb.set_trace()
+
+    model_name = os.path.basename(args.model_name)
+    output_dir = os.path.join(args.output_dir, model_name, task_name)
+    os.makedirs(output_dir, exist_ok=True)
+    offset = 0
+    for (src_lang, tgt_lang), size in zip(directions, sizes):
+        hyps = outputs[offset: offset + size]
+        output_file = f"result_{src_lang}-{tgt_lang}.json"
+        with open(os.path.join(output_dir, output_file), "w") as f:
+            json.dump({"outputs": hyps}, f, indent=4, ensure_ascii=False)
+        offset += size
+
+
+if __name__ == "__main__":
+    main()

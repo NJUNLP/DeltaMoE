@@ -1,0 +1,8 @@
+description: 'Az alábbiakban számítástechnikával kapcsolatos többszörös választásos kérdések (válaszokkal) találhatók. 
+  Gondolkozz lépésről lépésre, majd fejezd be a válaszodat a "A válasz (X)" kifejezéssel, ahol X a helyes válasz betűjelét jelöli.
+
+  '
+include: _hu_template_yaml
+task: mmlu_prox_hu_computer_science
+task_alias: computer_science
+process_docs: !function utils.process_computer_science

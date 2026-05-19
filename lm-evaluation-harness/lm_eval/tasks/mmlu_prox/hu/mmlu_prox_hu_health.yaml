@@ -1,0 +1,8 @@
+description: 'Az alábbiakban egészségüggyel kapcsolatos többszörös választásos kérdések (válaszokkal) találhatók. 
+  Gondolkozz át lépésről lépésre a problémán, majd a válaszodat a "A helyes válasz: (X)" formában add meg, ahol X a helyes válasz betűjelét jelöli.
+
+  '
+include: _hu_template_yaml
+task: mmlu_prox_hu_health
+task_alias: health
+process_docs: !function utils.process_health

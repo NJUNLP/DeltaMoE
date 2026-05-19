@@ -1,0 +1,12 @@
+### Note: DO NOT use quantized model or quantization_bit when merging lora adapters
+
+### model
+model_name_or_path: /mnt/nas/users/zhouhao.zh/LLMs/Qwen2.5-7B-Instruct
+adapter_name_or_path: /mnt/nas/users/zhouhao.zh/new_project/hf_ckpt/moelpr/qwen7B_instruct_hu_3B_bn_3B_sr_3B_2048_lr1e-4_lora64
+trust_remote_code: true
+
+### export
+export_dir: /mnt/nas/users/zhouhao.zh/new_project/hf_ckpt/moelpr/qwen7B_instruct_hu_3B_bn_3B_sr_3B_2048_lr1e-4_lora64_dense_merged
+export_size: 5
+export_device: cpu  # choices: [cpu, auto]
+export_legacy_format: false
